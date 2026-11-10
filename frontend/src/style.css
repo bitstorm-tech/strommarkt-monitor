@@ -68,3 +68,7 @@ dialog fieldset > div { columns: 16rem; }
 dialog label { display: block; padding: 0.15rem 0; overflow-wrap: anywhere; break-inside: avoid; }
 dialog input { width: auto; }
 dialog button { margin-right: 0.5rem; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.tabs button { margin-bottom: -1px; border-radius: 6px 6px 0 0; background: none; color: var(--muted); }
+.tabs button[aria-selected='true'] { background: var(--surface); border-bottom-color: var(--surface); color: inherit; font-weight: 600; }

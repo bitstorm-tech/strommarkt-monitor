@@ -1,7 +1,7 @@
 mod import;
 
-use axum::{extract::{Query, State}, http::StatusCode, routing::get, Json, Router};
-use import::COLUMNS;
+use axum::{extract::{Path, Query, State}, http::StatusCode, routing::get, Json, Router};
+use import::Ansicht;
 use duckdb::{params_from_iter, types::{Value, ValueRef}, AccessMode, Config, Connection};
 use serde::Deserialize;
 use serde_json::{json, Map, Value as Json_};
@@ -22,21 +22,21 @@ struct Filter {
 /// Spaltenfilter: `Spalte.von=…` / `Spalte.bis=…` (Bereich), `Spalte=…` (Auswahl: gleich, sonst: beginnt mit).
 type Spaltenfilter = HashMap<String, String>;
 
-fn where_clause(f: &Filter, spalten: &Spaltenfilter) -> (String, Vec<Value>) {
+fn where_clause(a: &Ansicht, f: &Filter, spalten: &Spaltenfilter) -> (String, Vec<Value>) {
     let (mut conds, mut params) = (Vec::new(), Vec::<Value>::new());
     if let Some(q) = &f.q {
-        conds.push("ifnull(NameStromerzeugungseinheit, '') || ' ' || EinheitMastrNummer ILIKE ?".to_string());
+        conds.push(format!("concat_ws(' ', {}) ILIKE ?", a.suche.join(", ")));
         params.push(format!("%{q}%").into());
     }
     for (key, v) in spalten.iter().filter(|(_, v)| !v.is_empty()) {
         let (name, op) = match key.rsplit_once('.') {
             Some((c, "von")) => (c, ">= ?"),
             Some((c, "bis")) => (c, "<= ?"),
-            _ if import::AUSWAHL.contains(&key.as_str()) => (key.as_str(), "= ?"),
+            _ if a.auswahl.contains(&key.as_str()) => (key.as_str(), "= ?"),
             _ => (key.as_str(), "ILIKE ? || '%'"),
         };
         // Der Spaltenname landet im SQL-Text, deshalb nur bekannte Spalten; sonstige Parameter (sort, page …) fallen hier raus.
-        if !COLUMNS.contains(&name) {
+        if !a.spalten.contains(&name) {
             continue;
         }
         conds.push(format!("{name} {op}"));
@@ -56,35 +56,36 @@ fn to_json(v: ValueRef) -> Json_ {
     }
 }
 
-fn einheiten(db: &Connection, f: &Filter, spalten: &Spaltenfilter) -> Res<Json_> {
-    let (wher, params) = where_clause(f, spalten);
-    let total: i64 = db.query_row(&format!("SELECT count(*) FROM einheiten {wher}"), params_from_iter(&params), |r| r.get(0))?;
+fn zeilen(db: &Connection, a: &Ansicht, f: &Filter, spalten: &Spaltenfilter) -> Res<Json_> {
+    let (wher, params) = where_clause(a, f, spalten);
+    let t = a.name;
+    let total: i64 = db.query_row(&format!("SELECT count(*) FROM {t} {wher}"), params_from_iter(&params), |r| r.get(0))?;
     // `sort` landet im SQL-Text, deshalb nur bekannte Spaltennamen zulassen.
-    let sort = f.sort.as_deref().filter(|s| COLUMNS.contains(s)).unwrap_or("rowid");
+    let sort = f.sort.as_deref().filter(|s| a.spalten.contains(s)).unwrap_or("rowid");
     let dir = if f.desc == Some(true) { "DESC" } else { "ASC" };
     let size = f.page_size.unwrap_or(50).min(1000) as u64; // größte Seitengröße im Frontend
     // Erst nur die rowids der Seite bestimmen, dann deren Spalten holen: sonst sortiert DuckDB bei hohen
-    // Seiten alle 127 Spalten aller Treffer (42 s statt 0,1 s für Seite 100.000).
+    // Seiten alle ~130 Spalten aller Treffer (42 s statt 0,1 s für Seite 100.000).
     let order = format!("ORDER BY {sort} {dir}, rowid {dir}");
     let sql = format!(
-        "SELECT {} FROM einheiten WHERE rowid IN (SELECT rowid FROM einheiten {wher} {order} LIMIT {size} OFFSET {}) {order}",
-        COLUMNS.join(","),
+        "SELECT {} FROM {t} WHERE rowid IN (SELECT rowid FROM {t} {wher} {order} LIMIT {size} OFFSET {}) {order}",
+        a.spalten.join(","),
         f.page.unwrap_or(0) as u64 * size
     );
     let rows = db
         .prepare(&sql)?
         .query_map(params_from_iter(&params), |r| {
-            COLUMNS.iter().enumerate().map(|(i, c)| Ok((c.to_string(), to_json(r.get_ref(i)?)))).collect::<duckdb::Result<Map<_, _>>>()
+            a.spalten.iter().enumerate().map(|(i, c)| Ok((c.to_string(), to_json(r.get_ref(i)?)))).collect::<duckdb::Result<Map<_, _>>>()
         })?
         .collect::<duckdb::Result<Vec<_>>>()?;
     Ok(json!({ "total": total, "rows": rows }))
 }
 
 /// Mögliche Werte der Auswahl-Filter: { "Bundesland": ["Bayern", …], … }
-fn filterwerte(db: &Connection) -> Res<Json_> {
+fn filterwerte(db: &Connection, a: &Ansicht) -> Res<Json_> {
     let mut out = Map::new();
-    let mut stmt = db.prepare("SELECT spalte, wert FROM filterwerte ORDER BY spalte, wert")?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, to_json(r.get_ref(1)?))))? {
+    let mut stmt = db.prepare("SELECT spalte, wert FROM filterwerte WHERE ansicht = ? ORDER BY spalte, wert")?;
+    for row in stmt.query_map([a.name], |r| Ok((r.get::<_, String>(0)?, to_json(r.get_ref(1)?))))? {
         let (spalte, wert) = row?;
         out.entry(spalte).or_insert_with(|| json!([])).as_array_mut().unwrap().push(wert);
     }
@@ -92,8 +93,8 @@ fn filterwerte(db: &Connection) -> Res<Json_> {
 }
 
 /// Alle Spalten mit Anzeigetyp: [{ "key": "Bruttoleistung", "type": "num" }, …]
-fn spalten() -> Json_ {
-    COLUMNS.iter().map(|c| json!({ "key": c, "type": import::typ(c) })).collect()
+fn spalten(a: &Ansicht) -> Json_ {
+    a.spalten.iter().map(|c| json!({ "key": c, "type": import::typ(c) })).collect()
 }
 
 /// Eine DuckDB-Instanz für alle Anfragen: jede Instanz hat eigenen Puffer und eigene Threads, eine pro Anfrage
@@ -124,6 +125,10 @@ impl Db {
     }
 }
 
+fn finde(name: &str) -> Result<&'static Ansicht, (StatusCode, String)> {
+    import::ansicht(name).ok_or((StatusCode::NOT_FOUND, "Unbekannte Tabelle".into()))
+}
+
 /// DuckDB blockiert, daher läuft jede Anfrage auf einem Blocking-Thread.
 async fn with_db(db: Arc<Db>, f: impl FnOnce(&Connection) -> Res<Json_> + Send + 'static) -> Result<Json<Json_>, (StatusCode, String)> {
     // Die Erlaubnis wandert in den Thread: bricht der Client ab, läuft die Abfrage trotzdem zu Ende und zählt weiter mit.
@@ -150,9 +155,15 @@ async fn main() -> Res<()> {
         return import::import(args.get(2).ok_or("Aufruf: backend import <Gesamtdatenexport.zip>")?, &db);
     }
     let app = Router::new()
-        .route("/api/einheiten", get(|State(db), Query(f): Query<Filter>, Query(s): Query<Spaltenfilter>| with_db(db, move |c| einheiten(c, &f, &s))))
-        .route("/api/filter", get(|State(db)| with_db(db, filterwerte)))
-        .route("/api/spalten", get(|| async { Json(spalten()) }))
+        .route("/api/{ansicht}", get(|State(db), Path(a): Path<String>, Query(f): Query<Filter>, Query(s): Query<Spaltenfilter>| async move {
+            let a = finde(&a)?;
+            with_db(db, move |c| zeilen(c, a, &f, &s)).await
+        }))
+        .route("/api/{ansicht}/filter", get(|State(db), Path(a): Path<String>| async move {
+            let a = finde(&a)?;
+            with_db(db, move |c| filterwerte(c, a)).await
+        }))
+        .route("/api/{ansicht}/spalten", get(|Path(a): Path<String>| async move { finde(&a).map(|a| Json(spalten(a))) }))
         // Im Container liefert das Backend auch das gebaute Frontend aus
         .fallback_service(tower_http::services::ServeDir::new(std::env::var("STATIC_DIR").unwrap_or("../frontend/dist".into())))
         .with_state(Arc::new(Db { path: db, conn: Mutex::new(None), slots: Arc::new(Semaphore::new(2)) }));
@@ -167,40 +178,67 @@ mod tests {
 
     #[test]
     fn import_und_filter() {
-        // Wie im Export: UTF-16 mit BOM, Katalog-Ids, Entities.
-        let xml = "<?xml version='1.0' encoding='UTF-16'?><EinheitenSolar>\
-            <EinheitSolar><EinheitMastrNummer>SEE1</EinheitMastrNummer><NameStromerzeugungseinheit>Müller &amp; Söhne</NameStromerzeugungseinheit><Bundesland>1403</Bundesland><Bruttoleistung>9.900</Bruttoleistung><WeitereBrennstoffe>1403 7</WeitereBrennstoffe><Unbekannt>x</Unbekannt></EinheitSolar>\
-            <EinheitSolar><EinheitMastrNummer>SEE2</EinheitMastrNummer><Bundesland>1400</Bundesland><Bruttoleistung>100.000</Bruttoleistung></EinheitSolar>\
-            </EinheitenSolar>";
-        let utf16: Vec<u8> = format!("\u{feff}{xml}").encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let katalog = [("1403".to_string(), "Bayern".to_string())].into();
         let db = Connection::open_in_memory().unwrap();
         import::create(&db).unwrap();
-        let mut app = db.appender("einheiten").unwrap();
-        import::parse(&utf16[..], |row| import::insert(&mut app, &katalog, &row)).unwrap();
-        drop(app);
-        import::finish(&db).unwrap();
+        let kataloge: import::Kataloge = [
+            ("", [("1403".to_string(), "Bayern".to_string()), ("1".to_string(), "falsch".to_string())].into()),
+            ("Marktfunktion", [("1".to_string(), "Stromnetzbetreiber".to_string())].into()),
+        ]
+        .into();
+        // Wie im Export: UTF-16 mit BOM, Katalog-Ids, Entities.
+        let lade = |q: &import::Quelle, xml: &str| {
+            let utf16: Vec<u8> = format!("\u{feff}<?xml version='1.0' encoding='UTF-16'?><Liste>{xml}</Liste>").encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let mut app = db.appender(q.tabelle).unwrap();
+            import::parse(&utf16[..], |row| import::insert(&mut app, q, &kataloge, &row)).unwrap();
+        };
+        lade(&import::EINHEITEN, "<EinheitSolar><EinheitMastrNummer>SEE1</EinheitMastrNummer><NameStromerzeugungseinheit>Müller &amp; Söhne</NameStromerzeugungseinheit><Bundesland>1403</Bundesland><Bruttoleistung>9.900</Bruttoleistung><WeitereBrennstoffe>1403 7</WeitereBrennstoffe><LokationMaStRNummer>SEL1</LokationMaStRNummer><Unbekannt>x</Unbekannt></EinheitSolar>\
+            <EinheitSolar><EinheitMastrNummer>SEE2</EinheitMastrNummer><Bundesland>1400</Bundesland><Bruttoleistung>100.000</Bruttoleistung></EinheitSolar>");
+        lade(&import::MARKTAKTEURE, "<M><MastrNummer>SNB1</MastrNummer><Firmenname>Netz GmbH</Firmenname><Marktfunktion>1</Marktfunktion></M>");
+        lade(&import::LOKATIONEN, "<L><MastrNummer>SEL1</MastrNummer><VerknuepfteEinheitenMaStRNummern>SEE1</VerknuepfteEinheitenMaStRNummern></L>");
+        // Zwei Netzanschlusspunkte derselben Lokation: die Einheit bleibt eine Zeile.
+        lade(&import::NETZANSCHLUSSPUNKTE, "<N><NetzanschlusspunktMastrNummer>SAN1</NetzanschlusspunktMastrNummer><LokationMaStRNummer>SEL1</LokationMaStRNummer><NetzbetreiberMaStRNummer>SNB1</NetzbetreiberMaStRNummer></N>\
+            <N><NetzanschlusspunktMastrNummer>SAN2</NetzanschlusspunktMastrNummer><LokationMaStRNummer>SEL1</LokationMaStRNummer><NetzbetreiberMaStRNummer>SNB1</NetzbetreiberMaStRNummer></N>");
+        import::finish(&db, "memory").unwrap();
 
+        let a = |name| import::ansicht(name).unwrap();
         let none = Spaltenfilter::new();
-        let all = einheiten(&db, &Filter { sort: Some("Bruttoleistung; DROP TABLE einheiten".into()), ..Default::default() }, &none).unwrap();
+        let all = zeilen(&db, a("einheiten"), &Filter { sort: Some("Bruttoleistung; DROP TABLE einheiten".into()), ..Default::default() }, &none).unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["rows"][0]["NameStromerzeugungseinheit"], "Müller & Söhne");
         assert_eq!(all["rows"][0]["Bruttoleistung"], 9.9);
         assert_eq!(all["rows"][0]["WeitereBrennstoffe"], "Bayern, 7");
         assert_eq!(all["rows"][1]["WeitereBrennstoffe"], Json_::Null);
-        assert!(spalten().as_array().unwrap().contains(&json!({ "key": "Bruttoleistung", "type": "num" })));
+        assert!(spalten(a("einheiten")).as_array().unwrap().contains(&json!({ "key": "Bruttoleistung", "type": "num" })));
 
         let f = Filter { q: Some("müller".into()), ..Default::default() };
         let s = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Spaltenfilter>();
-        let total = |f: &Filter, s: Spaltenfilter| einheiten(&db, f, &s).unwrap()["total"].clone();
-        assert_eq!(total(&f, s(&[("Bundesland", "Bayern"), ("Bruttoleistung.bis", "10")])), 1);
+        let total = |name, f: &Filter, s: Spaltenfilter| zeilen(&db, a(name), f, &s).unwrap()["total"].clone();
+        assert_eq!(total("einheiten", &f, s(&[("Bundesland", "Bayern"), ("Bruttoleistung.bis", "10")])), 1);
         // Zahlen numerisch vergleichen (als Text wäre "9.9" > "10"), Auswahl exakt, Text als Präfix, Unbekanntes ignorieren.
-        assert_eq!(total(&Filter::default(), s(&[("Bruttoleistung.von", "10")])), 1);
-        assert_eq!(total(&Filter::default(), s(&[("Bundesland", "Bay")])), 0);
-        assert_eq!(total(&Filter::default(), s(&[("NameStromerzeugungseinheit", "mül")])), 1);
-        assert_eq!(total(&Filter::default(), s(&[("x; DROP TABLE einheiten", "1"), ("page", "0"), ("Ort", "")])), 2);
-        let desc = einheiten(&db, &Filter { sort: Some("Bruttoleistung".into()), desc: Some(true), ..Default::default() }, &none).unwrap();
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("Bruttoleistung.von", "10")])), 1);
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("Bundesland", "Bay")])), 0);
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("NameStromerzeugungseinheit", "mül")])), 1);
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("x; DROP TABLE einheiten", "1"), ("page", "0"), ("Ort", "")])), 2);
+        // Spalten einer anderen Ansicht gelten nicht als Filter.
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("Marktfunktion", "x")])), 2);
+        let desc = zeilen(&db, a("einheiten"), &Filter { sort: Some("Bruttoleistung".into()), desc: Some(true), ..Default::default() }, &none).unwrap();
         assert_eq!(desc["rows"][0]["EinheitMastrNummer"], "SEE2");
-        assert_eq!(filterwerte(&db).unwrap()["Bundesland"], json!(["1400", "Bayern"]));
+        assert_eq!(filterwerte(&db, a("einheiten")).unwrap()["Bundesland"], json!(["1400", "Bayern"]));
+
+        let verknuepft = zeilen(&db, a("einheiten"), &Filter { q: Some("SEE1".into()), ..Default::default() }, &none).unwrap();
+        assert_eq!(verknuepft["total"], 1);
+        assert_eq!(verknuepft["rows"][0]["NetzbetreiberName"], "Netz GmbH");
+        assert_eq!(verknuepft["rows"][0]["NetzbetreiberMastrNummer"], "SNB1");
+        assert_eq!(total("einheiten", &Filter::default(), s(&[("NetzbetreiberName", "netz")])), 1);
+
+        let nap = zeilen(&db, a("netzanschlusspunkte"), &Filter { sort: Some("NetzanschlusspunktMastrNummer".into()), ..Default::default() }, &none).unwrap();
+        assert_eq!(nap["total"], 2);
+        assert_eq!(nap["rows"][1]["NetzanschlusspunktMastrNummer"], "SAN2");
+        assert_eq!(nap["rows"][1]["VerknuepfteEinheitenMaStRNummern"], "SEE1");
+        assert_eq!(nap["rows"][1]["NetzbetreiberName"], "Netz GmbH");
+
+        let akteure = zeilen(&db, a("marktakteure"), &Filter { q: Some("netz".into()), ..Default::default() }, &none).unwrap();
+        assert_eq!(akteure["rows"][0]["Marktfunktion"], "Stromnetzbetreiber");
+        assert_eq!(filterwerte(&db, a("marktakteure")).unwrap()["Marktfunktion"], json!(["Stromnetzbetreiber"]));
     }
 }

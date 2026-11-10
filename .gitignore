@@ -2,4 +2,5 @@
 mastr/
 *.db
 *.db.tmp
+*.db.roh
 backend/target/
