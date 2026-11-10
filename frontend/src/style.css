@@ -52,7 +52,10 @@ tbody tr:last-child td { border-bottom: 0; }
 dialog { width: min(64rem, 100% - 2rem); padding: 1rem 1.25rem; background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 8px; }
 dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 dialog h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
-dialog fieldset { columns: 16rem; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; }
+/* Nur die Spaltenliste scrollt, Überschrift und Buttons bleiben sichtbar.
+   Spalten auf dem inneren div: Mehrspaltensatz mit begrenzter Höhe würde seitlich überlaufen statt zu scrollen. */
+dialog fieldset { max-height: calc(100dvh - 12rem); overflow-y: auto; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; }
+dialog fieldset > div { columns: 16rem; }
 dialog label { display: block; padding: 0.15rem 0; overflow-wrap: anywhere; break-inside: avoid; }
 dialog input { width: auto; }
 dialog button { margin-right: 0.5rem; }

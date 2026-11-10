@@ -162,10 +162,12 @@ load()
       <h2 id="einstellungen-titel">Einstellungen</h2>
       <fieldset>
         <legend>Sichtbare Spalten</legend>
-        <label v-for="c in choices" :key="c.key"><input v-model="visible" type="checkbox" :value="c.key" /> {{ c.label }}</label>
+        <div><label v-for="c in choices" :key="c.key"><input v-model="visible" type="checkbox" :value="c.key" /> {{ c.label }}</label></div>
       </fieldset>
-      <button type="button" @click="visible = standard.map((c) => c.key)">Standardspalten</button>
-      <button>Schließen</button>
+      <div>
+        <button type="button" @click="visible = standard.map((c) => c.key)">Standardspalten</button>
+        <button>Schließen</button>
+      </div>
     </form>
   </dialog>
 </template>
