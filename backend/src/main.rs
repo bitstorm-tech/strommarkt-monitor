@@ -120,8 +120,10 @@ async fn main() -> Res<()> {
         .route("/api/einheiten", get(|State(db), Query(f): Query<Filter>, Query(s): Query<Spaltenfilter>| with_db(db, move |c| einheiten(c, &f, &s))))
         .route("/api/filter", get(|State(db)| with_db(db, filterwerte)))
         .route("/api/spalten", get(|| async { Json(spalten()) }))
+        // Im Container liefert das Backend auch das gebaute Frontend aus
+        .fallback_service(tower_http::services::ServeDir::new(std::env::var("STATIC_DIR").unwrap_or("../frontend/dist".into())))
         .with_state(Arc::<str>::from(db));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    let listener = tokio::net::TcpListener::bind(std::env::var("ADDR").unwrap_or("127.0.0.1:3000".into())).await?;
     eprintln!("Backend läuft auf http://{}", listener.local_addr()?);
     Ok(axum::serve(listener, app).await?)
 }

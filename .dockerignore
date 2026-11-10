@@ -1,0 +1,6 @@
+**/node_modules
+**/dist
+backend/target
+mastr
+*.db
+*.db.tmp
