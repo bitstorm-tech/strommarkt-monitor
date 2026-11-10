@@ -5,48 +5,45 @@ use import::COLUMNS;
 use rusqlite::{params_from_iter, types::{Value, ValueRef}, Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::{json, Map, Value as Json_};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Deserialize, Default)]
 struct Filter {
     q: Option<String>,
-    energietraeger: Option<String>,
-    betriebsstatus: Option<String>,
-    bundesland: Option<String>,
-    plz: Option<String>,
-    ort: Option<String>,
-    leistung_min: Option<f64>,
-    leistung_max: Option<f64>,
-    inbetriebnahme_von: Option<String>,
-    inbetriebnahme_bis: Option<String>,
     sort: Option<String>,
     desc: Option<bool>,
     page: Option<u32>,
     page_size: Option<u32>,
 }
 
-fn where_clause(f: &Filter) -> (String, Vec<Value>) {
-    let (mut conds, mut params) = (Vec::new(), Vec::new());
-    let mut add = |cond: &'static str, v: Option<Value>| {
-        if let Some(v) = v {
-            conds.push(cond);
-            params.push(v);
+/// Spaltenfilter: `Spalte.von=…` / `Spalte.bis=…` (Bereich), `Spalte=…` (Auswahl: gleich, sonst: beginnt mit).
+type Spaltenfilter = HashMap<String, String>;
+
+fn where_clause(f: &Filter, spalten: &Spaltenfilter) -> (String, Vec<Value>) {
+    let (mut conds, mut params) = (Vec::new(), Vec::<Value>::new());
+    if let Some(q) = &f.q {
+        conds.push("ifnull(NameStromerzeugungseinheit, '') || ' ' || EinheitMastrNummer LIKE ?".to_string());
+        params.push(format!("%{q}%").into());
+    }
+    for (key, v) in spalten.iter().filter(|(_, v)| !v.is_empty()) {
+        let (name, op) = match key.rsplit_once('.') {
+            Some((c, "von")) => (c, ">= ?"),
+            Some((c, "bis")) => (c, "<= ?"),
+            _ if import::AUSWAHL.contains(&key.as_str()) => (key.as_str(), "= ?"),
+            // GLOB statt LIKE: nur GLOB kann für die Präfixsuche den Index nutzen.
+            _ if key == "Postleitzahl" => (key.as_str(), "GLOB ? || '*'"),
+            _ => (key.as_str(), "LIKE ? || '%'"),
+        };
+        // Der Spaltenname landet im SQL-Text, deshalb nur bekannte Spalten; sonstige Parameter (sort, page …) fallen hier raus.
+        if !COLUMNS.contains(&name) {
+            continue;
         }
-    };
-    let text = |s: &Option<String>| s.clone().map(Value::from);
-    add("ifnull(NameStromerzeugungseinheit, '') || ' ' || EinheitMastrNummer LIKE ?", f.q.as_ref().map(|q| format!("%{q}%").into()));
-    add("Energietraeger = ?", text(&f.energietraeger));
-    add("EinheitBetriebsstatus = ?", text(&f.betriebsstatus));
-    add("Bundesland = ?", text(&f.bundesland));
-    // GLOB statt LIKE: nur GLOB kann für die Präfixsuche den Index nutzen.
-    add("Postleitzahl GLOB ?", f.plz.as_ref().map(|p| format!("{p}*").into()));
-    add("Ort LIKE ?", f.ort.as_ref().map(|o| format!("{o}%").into()));
-    add("Bruttoleistung >= ?", f.leistung_min.map(Value::from));
-    add("Bruttoleistung <= ?", f.leistung_max.map(Value::from));
-    add("Inbetriebnahmedatum >= ?", text(&f.inbetriebnahme_von));
-    add("Inbetriebnahmedatum <= ?", text(&f.inbetriebnahme_bis));
+        conds.push(format!("{name} {op}"));
+        // Als Text gebunden: SQLite wandelt ihn beim Vergleich mit einer REAL-Spalte selbst in eine Zahl.
+        params.push(v.clone().into());
+    }
     let sql = if conds.is_empty() { String::new() } else { format!("WHERE {}", conds.join(" AND ")) };
     (sql, params)
 }
@@ -60,8 +57,8 @@ fn to_json(v: ValueRef) -> Json_ {
     }
 }
 
-fn einheiten(db: &Connection, f: &Filter) -> Res<Json_> {
-    let (wher, params) = where_clause(f);
+fn einheiten(db: &Connection, f: &Filter, spalten: &Spaltenfilter) -> Res<Json_> {
+    let (wher, params) = where_clause(f, spalten);
     // shortcut: count(*) und LIKE '%…%' scannen Tabelle bzw. Index (1–3 s bei 10 Mio. Zeilen mit 127 Spalten); bei Bedarf FTS5 / Count-Cache.
     let total: i64 = db.query_row(&format!("SELECT count(*) FROM einheiten {wher}"), params_from_iter(&params), |r| r.get(0))?;
     // `sort` landet im SQL-Text, deshalb nur bekannte Spaltennamen zulassen.
@@ -120,7 +117,7 @@ async fn main() -> Res<()> {
         return import::import(args.get(2).ok_or("Aufruf: backend import <Gesamtdatenexport.zip>")?, &db);
     }
     let app = Router::new()
-        .route("/api/einheiten", get(|State(db), Query(f): Query<Filter>| with_db(db, move |c| einheiten(c, &f))))
+        .route("/api/einheiten", get(|State(db), Query(f): Query<Filter>, Query(s): Query<Spaltenfilter>| with_db(db, move |c| einheiten(c, &f, &s))))
         .route("/api/filter", get(|State(db)| with_db(db, filterwerte)))
         .route("/api/spalten", get(|| async { Json(spalten()) }))
         .with_state(Arc::<str>::from(db));
@@ -147,7 +144,8 @@ mod tests {
         import::parse(&utf16[..], |row| import::insert(&db, &katalog, &row)).unwrap();
         import::finish(&db).unwrap();
 
-        let all = einheiten(&db, &Filter { sort: Some("Bruttoleistung; DROP TABLE einheiten".into()), ..Default::default() }).unwrap();
+        let none = Spaltenfilter::new();
+        let all = einheiten(&db, &Filter { sort: Some("Bruttoleistung; DROP TABLE einheiten".into()), ..Default::default() }, &none).unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["rows"][0]["NameStromerzeugungseinheit"], "Müller & Söhne");
         assert_eq!(all["rows"][0]["Bruttoleistung"], 9.9);
@@ -155,9 +153,16 @@ mod tests {
         assert_eq!(all["rows"][1]["WeitereBrennstoffe"], Json_::Null);
         assert!(spalten().as_array().unwrap().contains(&json!({ "key": "Bruttoleistung", "type": "num" })));
 
-        let f = Filter { bundesland: Some("Bayern".into()), q: Some("müller".into()), leistung_max: Some(10.0), ..Default::default() };
-        assert_eq!(einheiten(&db, &f).unwrap()["total"], 1);
-        let desc = einheiten(&db, &Filter { sort: Some("Bruttoleistung".into()), desc: Some(true), ..Default::default() }).unwrap();
+        let f = Filter { q: Some("müller".into()), ..Default::default() };
+        let s = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Spaltenfilter>();
+        let total = |f: &Filter, s: Spaltenfilter| einheiten(&db, f, &s).unwrap()["total"].clone();
+        assert_eq!(total(&f, s(&[("Bundesland", "Bayern"), ("Bruttoleistung.bis", "10")])), 1);
+        // Zahlen numerisch vergleichen (als Text wäre "9.9" > "10"), Auswahl exakt, Text als Präfix, Unbekanntes ignorieren.
+        assert_eq!(total(&Filter::default(), s(&[("Bruttoleistung.von", "10")])), 1);
+        assert_eq!(total(&Filter::default(), s(&[("Bundesland", "Bay")])), 0);
+        assert_eq!(total(&Filter::default(), s(&[("NameStromerzeugungseinheit", "mül")])), 1);
+        assert_eq!(total(&Filter::default(), s(&[("x; DROP TABLE einheiten", "1"), ("page", "0"), ("Ort", "")])), 2);
+        let desc = einheiten(&db, &Filter { sort: Some("Bruttoleistung".into()), desc: Some(true), ..Default::default() }, &none).unwrap();
         assert_eq!(desc["rows"][0]["EinheitMastrNummer"], "SEE2");
         assert_eq!(filterwerte(&db).unwrap()["Bundesland"], json!(["1400", "Bayern"]));
     }

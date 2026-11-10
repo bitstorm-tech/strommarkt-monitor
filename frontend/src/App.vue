@@ -17,17 +17,8 @@ const standard = [
   { key: 'Ort', label: 'Ort' },
   { key: 'Landkreis', label: 'Landkreis' },
 ]
-const selects = [
-  { param: 'energietraeger', column: 'Energietraeger', label: 'Energieträger' },
-  { param: 'betriebsstatus', column: 'EinheitBetriebsstatus', label: 'Betriebsstatus' },
-  { param: 'bundesland', column: 'Bundesland', label: 'Bundesland' },
-]
-const emptyFilter = () => ({
-  q: '', energietraeger: '', betriebsstatus: '', bundesland: '', plz: '', ort: '',
-  leistung_min: '', leistung_max: '', inbetriebnahme_von: '', inbetriebnahme_bis: '',
-})
-
-const filter = reactive(emptyFilter())
+// Suche plus ein Filter je sichtbarer Spalte: `Spalte.von`/`Spalte.bis` bei Zahlen und Daten, sonst `Spalte`.
+const filter = reactive({ q: '' })
 const view = reactive({ sort: '', desc: false, page: 0 })
 const options = ref({})
 const result = ref({ total: 0, rows: [] })
@@ -54,7 +45,7 @@ async function load() {
   const mine = (running = new AbortController())
   const params = new URLSearchParams({ page: view.page, page_size: PAGE_SIZE, desc: view.desc })
   if (view.sort) params.set('sort', view.sort)
-  for (const [k, v] of Object.entries(filter)) if (v !== '') params.set(k, v)
+  for (const [k, v] of Object.entries(filter)) if (v !== '' && v != null) params.set(k, v)
   loading.value = true
   try {
     result.value = await getJson(`/api/einheiten?${params}`, mine.signal)
@@ -77,6 +68,8 @@ watch(view, schedule)
 watch(visible, (v) => {
   localStorage.setItem('spalten', JSON.stringify(v))
   if (!v.includes(view.sort)) view.sort = '' // nicht nach einer unsichtbaren Spalte sortieren
+  // Filter ausgeblendeter Spalten entfernen, sonst filtern sie unsichtbar weiter.
+  for (const k of Object.keys(filter)) if (k !== 'q' && !v.includes(k.split('.')[0])) delete filter[k]
 })
 
 function sortBy(key) {
@@ -107,32 +100,26 @@ load()
     <p>Stromerzeugungseinheiten aus dem Marktstammdatenregister der Bundesnetzagentur</p>
   </header>
 
-  <form class="filter" @submit.prevent @reset.prevent="Object.assign(filter, emptyFilter())">
+  <form class="filter" @submit.prevent @reset.prevent="Object.keys(filter).forEach((k) => (filter[k] = ''))">
     <label class="wide">Suche (Name oder MaStR-Nr.)
       <input v-model.trim="filter.q" type="search" placeholder="z. B. Solarpark oder SEE9…" />
     </label>
-    <label v-for="s in selects" :key="s.param">{{ s.label }}
-      <select v-model="filter[s.param]">
-        <option value="">Alle</option>
-        <option v-for="o in options[s.column]" :key="o">{{ o }}</option>
-      </select>
-    </label>
-    <label>PLZ beginnt mit
-      <input v-model.trim="filter.plz" inputmode="numeric" maxlength="5" />
-    </label>
-    <label>Ort beginnt mit
-      <input v-model.trim="filter.ort" />
-    </label>
-    <fieldset>
-      <legend>Bruttoleistung (kW)</legend>
-      <input v-model="filter.leistung_min" type="number" min="0" step="any" placeholder="von" aria-label="Bruttoleistung von" />
-      <input v-model="filter.leistung_max" type="number" min="0" step="any" placeholder="bis" aria-label="Bruttoleistung bis" />
-    </fieldset>
-    <fieldset>
-      <legend>Inbetriebnahme</legend>
-      <input v-model="filter.inbetriebnahme_von" type="date" aria-label="Inbetriebnahme von" />
-      <input v-model="filter.inbetriebnahme_bis" type="date" aria-label="Inbetriebnahme bis" />
-    </fieldset>
+    <template v-for="c in columns" :key="c.key">
+      <fieldset v-if="c.type === 'num' || c.type === 'date'">
+        <legend>{{ c.label }}</legend>
+        <input v-model="filter[c.key + '.von']" :type="c.type === 'num' ? 'number' : 'date'" step="any" placeholder="von" :aria-label="c.label + ' von'" />
+        <input v-model="filter[c.key + '.bis']" :type="c.type === 'num' ? 'number' : 'date'" step="any" placeholder="bis" :aria-label="c.label + ' bis'" />
+      </fieldset>
+      <label v-else-if="options[c.key]">{{ c.label }}
+        <select v-model="filter[c.key]">
+          <option value="">Alle</option>
+          <option v-for="o in options[c.key]" :key="o">{{ o }}</option>
+        </select>
+      </label>
+      <label v-else>{{ c.label }} beginnt mit
+        <input v-model.trim="filter[c.key]" />
+      </label>
+    </template>
     <button type="reset">Filter zurücksetzen</button>
   </form>
 

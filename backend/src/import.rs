@@ -57,7 +57,7 @@ const KATALOG: &[&str] = &[
 /// Alle Spalten; die Katalog-Spalten stehen am Ende (darauf verlässt sich `insert`).
 pub static COLUMNS: LazyLock<Vec<&str>> = LazyLock::new(|| [TEXT, DATUM, ZAHL, KATALOG].concat());
 /// Spalten mit Auswahl-Filter.
-const AUSWAHL: &[&str] = &["Energietraeger", "EinheitBetriebsstatus", "Bundesland"];
+pub const AUSWAHL: &[&str] = &["Energietraeger", "EinheitBetriebsstatus", "Bundesland"];
 const INDEXED: &[&str] = &["Energietraeger", "Bundesland", "Bruttoleistung", "Inbetriebnahmedatum", "Postleitzahl"];
 /// Alle Stromerzeugungseinheiten (ohne Verbraucher- und Gas-Einheiten).
 const FILES: &[&str] = &[
