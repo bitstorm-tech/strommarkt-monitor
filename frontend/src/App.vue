@@ -88,8 +88,8 @@ load()
 
 <template>
   <header>
-    <h1>Stromerzeugungseinheiten</h1>
-    <p>Marktstammdatenregister der Bundesnetzagentur</p>
+    <h1>Strommarkt-Monitor</h1>
+    <p>Stromerzeugungseinheiten aus dem Marktstammdatenregister der Bundesnetzagentur</p>
   </header>
 
   <form class="filter" @submit.prevent @reset.prevent="Object.assign(filter, emptyFilter())">
