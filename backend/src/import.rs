@@ -1,7 +1,7 @@
-//! Import des MaStR-Gesamtdatenexports (ZIP mit XML-Dateien) nach SQLite.
+//! Import des MaStR-Gesamtdatenexports (ZIP mit XML-Dateien) nach DuckDB.
 use crate::Res;
 use encoding_rs_io::DecodeReaderBytes;
-use rusqlite::Connection;
+use duckdb::{appender_params_from_iter, Appender, Config, Connection};
 use serde::{de::{IgnoredAny, MapAccess, Visitor}, Deserializer};
 use std::{collections::HashMap, fs::File, io::{BufReader, Read}, sync::LazyLock};
 
@@ -58,7 +58,6 @@ const KATALOG: &[&str] = &[
 pub static COLUMNS: LazyLock<Vec<&str>> = LazyLock::new(|| [TEXT, DATUM, ZAHL, KATALOG].concat());
 /// Spalten mit Auswahl-Filter.
 pub const AUSWAHL: &[&str] = &["Energietraeger", "EinheitBetriebsstatus", "Bundesland"];
-const INDEXED: &[&str] = &["Energietraeger", "Bundesland", "Bruttoleistung", "Inbetriebnahmedatum", "Postleitzahl"];
 /// Alle Stromerzeugungseinheiten (ohne Verbraucher- und Gas-Einheiten).
 const FILES: &[&str] = &[
     "EinheitenSolar", "EinheitenWind", "EinheitenBiomasse", "EinheitenWasser", "EinheitenVerbrennung",
@@ -102,29 +101,25 @@ pub fn typ(column: &str) -> &'static str {
 }
 
 pub fn create(db: &Connection) -> Res<()> {
-    let cols: Vec<String> = COLUMNS.iter().map(|c| format!("{c} {}", if ZAHL.contains(c) { "REAL" } else { "TEXT" })).collect();
+    let cols: Vec<String> = COLUMNS.iter().map(|c| format!("{c} {}", if ZAHL.contains(c) { "DOUBLE" } else { "TEXT" })).collect();
     Ok(db.execute_batch(&format!("CREATE TABLE einheiten ({})", cols.join(", ")))?)
 }
 
-pub fn insert(db: &Connection, katalog: &HashMap<String, String>, row: &Row) -> Res<()> {
-    static SQL: LazyLock<String> = LazyLock::new(|| format!("INSERT INTO einheiten VALUES ({})", vec!["?"; COLUMNS.len()].join(",")));
+pub fn insert(app: &mut Appender, katalog: &HashMap<String, String>, row: &Row) -> Res<()> {
     let (plain, kat) = COLUMNS.split_at(COLUMNS.len() - KATALOG.len());
     let klartext = |ids: &String| ids.split(' ').map(|id| katalog.get(id).map_or(id, |w| w)).collect::<Vec<_>>().join(", ");
-    db.prepare_cached(&SQL)?.execute(rusqlite::params_from_iter(
+    // Werte als Text: DuckDB wandelt sie beim Anhängen in den Spaltentyp (z. B. "9.900" → 9.9).
+    app.append_row(appender_params_from_iter(
         plain.iter().map(|c| row.get(*c).cloned()).chain(kat.iter().map(|c| row.get(*c).map(klartext))),
     ))?;
     Ok(())
 }
 
-/// Indizes und die Werte für die Auswahl-Filter (einmal hier statt bei jedem Seitenaufruf).
+/// Die Werte für die Auswahl-Filter (einmal hier statt bei jedem Seitenaufruf). Indizes braucht DuckDB nicht:
+/// es speichert spaltenweise und durchsucht eine Spalte mit 10 Mio. Werten in Millisekunden.
 pub fn finish(db: &Connection) -> Res<()> {
-    for c in INDEXED {
-        db.execute_batch(&format!("CREATE INDEX idx_{c} ON einheiten ({c})"))?;
-    }
-    // Deckt die Suche (Name oder MaStR-Nr.) ab: gezählt wird im Index statt in der breiten Tabelle (~1,4 s statt ~2,5 s).
-    db.execute_batch("CREATE INDEX idx_suche ON einheiten (NameStromerzeugungseinheit, EinheitMastrNummer)")?;
     let werte: Vec<String> = AUSWAHL.iter().map(|c| format!("SELECT DISTINCT '{c}' AS spalte, {c} AS wert FROM einheiten WHERE {c} IS NOT NULL")).collect();
-    Ok(db.execute_batch(&format!("CREATE TABLE filterwerte AS {}; ANALYZE;", werte.join(" UNION ALL ")))?)
+    Ok(db.execute_batch(&format!("CREATE TABLE filterwerte AS {}", werte.join(" UNION ALL ")))?)
 }
 
 pub fn import(zip_path: &str, db_path: &str) -> Res<()> {
@@ -143,22 +138,28 @@ pub fn import(zip_path: &str, db_path: &str) -> Res<()> {
     // In eine temporäre Datei schreiben: ein abgebrochener Import lässt die bisherige DB unberührt.
     let tmp = format!("{db_path}.tmp");
     let _ = std::fs::remove_file(&tmp);
-    let mut db = Connection::open(&tmp)?;
-    db.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
+    let _ = std::fs::remove_file(format!("{tmp}.wal"));
+    // Der Server hat 1 GB, ohne Grenze belegt der Import ~1,5 GB.
+    let db = Connection::open_with_flags(&tmp, Config::default().max_memory("150MB")?.threads(1)?)?;
     create(&db)?;
-    let tx = db.transaction()?;
+    let mut app = db.appender("einheiten")?;
     let mut total = 0;
     for (i, name) in names.iter().enumerate() {
         let mut n = 0;
         parse(zip.by_name(name)?, |row| {
             n += 1;
-            insert(&tx, &katalog, &row)
+            insert(&mut app, &katalog, &row)?;
+            // Der Appender puffert sonst ~200.000 Zeilen außerhalb der Speichergrenze.
+            if n % 10_000 == 0 {
+                app.flush()?;
+            }
+            Ok(())
         })?;
         total += n;
         eprintln!("[{}/{}] {name}: {n} Einheiten", i + 1, names.len());
     }
-    tx.commit()?;
-    eprintln!("{total} Einheiten importiert, erstelle Indizes …");
+    drop(app);
+    eprintln!("{total} Einheiten importiert, erstelle Filterwerte …");
     finish(&db)?;
     drop(db);
     std::fs::rename(&tmp, db_path)?;

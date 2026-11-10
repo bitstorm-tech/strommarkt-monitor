@@ -1,0 +1,3 @@
+[env]
+# Fertig gebaute libduckdb herunterladen statt DuckDB aus C++ zu übersetzen (braucht mehrere GB RAM)
+DUCKDB_DOWNLOAD_LIB = "1"
