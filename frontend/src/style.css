@@ -48,3 +48,11 @@ th[aria-sort='none'] span { opacity: 0.35; }
 tbody tr:hover { background: var(--bg); }
 tbody tr:last-child td { border-bottom: 0; }
 .empty { padding: 2rem; text-align: center; color: var(--muted); }
+
+dialog { width: min(64rem, 100% - 2rem); padding: 1rem 1.25rem; background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 8px; }
+dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+dialog h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
+dialog fieldset { columns: 16rem; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; }
+dialog label { display: block; padding: 0.15rem 0; overflow-wrap: anywhere; break-inside: avoid; }
+dialog input { width: auto; }
+dialog button { margin-right: 0.5rem; }

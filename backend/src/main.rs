@@ -62,7 +62,7 @@ fn to_json(v: ValueRef) -> Json_ {
 
 fn einheiten(db: &Connection, f: &Filter) -> Res<Json_> {
     let (wher, params) = where_clause(f);
-    // shortcut: count(*) und LIKE '%…%' scannen die Tabelle (bis ~1 s bei Millionen Zeilen); bei Bedarf FTS5 / Count-Cache.
+    // shortcut: count(*) und LIKE '%…%' scannen Tabelle bzw. Index (1–3 s bei 10 Mio. Zeilen mit 127 Spalten); bei Bedarf FTS5 / Count-Cache.
     let total: i64 = db.query_row(&format!("SELECT count(*) FROM einheiten {wher}"), params_from_iter(&params), |r| r.get(0))?;
     // `sort` landet im SQL-Text, deshalb nur bekannte Spaltennamen zulassen.
     let sort = f.sort.as_deref().filter(|s| COLUMNS.contains(s)).unwrap_or("rowid");
@@ -94,6 +94,11 @@ fn filterwerte(db: &Connection) -> Res<Json_> {
     Ok(out.into())
 }
 
+/// Alle Spalten mit Anzeigetyp: [{ "key": "Bruttoleistung", "type": "num" }, …]
+fn spalten() -> Json_ {
+    COLUMNS.iter().map(|c| json!({ "key": c, "type": import::typ(c) })).collect()
+}
+
 /// SQLite blockiert, daher pro Anfrage eine eigene Nur-Lese-Verbindung auf einem Blocking-Thread.
 async fn with_db(path: Arc<str>, f: impl FnOnce(&Connection) -> Res<Json_> + Send + 'static) -> Result<Json<Json_>, (StatusCode, String)> {
     tokio::task::spawn_blocking(move || f(&Connection::open_with_flags(&*path, OpenFlags::SQLITE_OPEN_READ_ONLY)?))
@@ -117,6 +122,7 @@ async fn main() -> Res<()> {
     let app = Router::new()
         .route("/api/einheiten", get(|State(db), Query(f): Query<Filter>| with_db(db, move |c| einheiten(c, &f))))
         .route("/api/filter", get(|State(db)| with_db(db, filterwerte)))
+        .route("/api/spalten", get(|| async { Json(spalten()) }))
         .with_state(Arc::<str>::from(db));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     eprintln!("Backend läuft auf http://{}", listener.local_addr()?);
@@ -131,21 +137,23 @@ mod tests {
     fn import_und_filter() {
         // Wie im Export: UTF-16 mit BOM, Katalog-Ids, Entities.
         let xml = "<?xml version='1.0' encoding='UTF-16'?><EinheitenSolar>\
-            <EinheitSolar><EinheitMastrNummer>SEE1</EinheitMastrNummer><NameStromerzeugungseinheit>Müller &amp; Söhne</NameStromerzeugungseinheit><Bundesland>1403</Bundesland><Bruttoleistung>9.900</Bruttoleistung><Unbekannt>x</Unbekannt></EinheitSolar>\
+            <EinheitSolar><EinheitMastrNummer>SEE1</EinheitMastrNummer><NameStromerzeugungseinheit>Müller &amp; Söhne</NameStromerzeugungseinheit><Bundesland>1403</Bundesland><Bruttoleistung>9.900</Bruttoleistung><WeitereBrennstoffe>1403 7</WeitereBrennstoffe><Unbekannt>x</Unbekannt></EinheitSolar>\
             <EinheitSolar><EinheitMastrNummer>SEE2</EinheitMastrNummer><Bundesland>1400</Bundesland><Bruttoleistung>100.000</Bruttoleistung></EinheitSolar>\
             </EinheitenSolar>";
         let utf16: Vec<u8> = format!("\u{feff}{xml}").encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let rows = import::parse(&utf16[..]).unwrap();
         let katalog = [("1403".to_string(), "Bayern".to_string())].into();
         let db = Connection::open_in_memory().unwrap();
         import::create(&db).unwrap();
-        import::insert(&db, &katalog, &rows).unwrap();
+        import::parse(&utf16[..], |row| import::insert(&db, &katalog, &row)).unwrap();
         import::finish(&db).unwrap();
 
         let all = einheiten(&db, &Filter { sort: Some("Bruttoleistung; DROP TABLE einheiten".into()), ..Default::default() }).unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["rows"][0]["NameStromerzeugungseinheit"], "Müller & Söhne");
         assert_eq!(all["rows"][0]["Bruttoleistung"], 9.9);
+        assert_eq!(all["rows"][0]["WeitereBrennstoffe"], "Bayern, 7");
+        assert_eq!(all["rows"][1]["WeitereBrennstoffe"], Json_::Null);
+        assert!(spalten().as_array().unwrap().contains(&json!({ "key": "Bruttoleistung", "type": "num" })));
 
         let f = Filter { bundesland: Some("Bayern".into()), q: Some("müller".into()), leistung_max: Some(10.0), ..Default::default() };
         assert_eq!(einheiten(&db, &f).unwrap()["total"], 1);

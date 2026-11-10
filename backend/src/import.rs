@@ -2,18 +2,62 @@
 use crate::Res;
 use encoding_rs_io::DecodeReaderBytes;
 use rusqlite::Connection;
-use serde::{de::{IgnoredAny, MapAccess, Visitor}, Deserialize, Deserializer};
-use std::{collections::HashMap, fs::File, io::{BufReader, Read}};
+use serde::{de::{IgnoredAny, MapAccess, Visitor}, Deserializer};
+use std::{collections::HashMap, fs::File, io::{BufReader, Read}, sync::LazyLock};
 
-/// Spalten der Tabelle `einheiten`; die Namen sind die Tag-Namen im MaStR-XML.
-pub const COLUMNS: &[&str] = &[
-    "EinheitMastrNummer", "NameStromerzeugungseinheit", "Energietraeger", "EinheitBetriebsstatus",
-    "Bruttoleistung", "Nettonennleistung", "Inbetriebnahmedatum", "Registrierungsdatum",
-    "Bundesland", "Postleitzahl", "Ort", "Landkreis",
+/// Spalten der Tabelle `einheiten` nach Typ: alle Felder, die in den Einheiten-Dateien vorkommen.
+/// Die Namen sind die Tag-Namen im MaStR-XML. Felder, die hier fehlen, werden beim Import verworfen.
+const TEXT: &[&str] = &[
+    "Adresszusatz", "AltAnlagenbetreiberMastrNummer", "AnlagenbetreiberMastrNummer", "EegAnlagentyp",
+    "EegMaStRNummer", "EinheitMastrNummer", "Einsatzverantwortlicher", "FlurFlurstuecknummern", "Gemarkung",
+    "Gemeinde", "Gemeindeschluessel", "GemeinsamRegistrierteSolareinheitMastrNummer", "GenMastrNummer",
+    "Hausnummer", "Kraftwerksnummer", "KwkMaStRNummer", "Landkreis", "LokationMaStRNummer",
+    "MastrNummernKombibetrieb", "NameDesSolarparks", "NameKraftwerk", "NameKraftwerksblock",
+    "NameStromerzeugungseinheit", "NameWindpark", "Ort", "Postleitzahl", "SpeMastrNummer", "Strasse",
+    "Typenbezeichnung", "Weic", "WeicDisplayName",
 ];
-const REAL: &[&str] = &["Bruttoleistung", "Nettonennleistung"];
-/// Im XML als Katalog-Id kodiert; wird beim Import in Klartext übersetzt. Zugleich die Auswahl-Filter.
-const KATALOG: &[&str] = &["Energietraeger", "EinheitBetriebsstatus", "Bundesland"];
+const DATUM: &[&str] = &[
+    "DatumBaubeginn", "DatumBeginnVoruebergehendeStilllegung", "DatumDesBetreiberwechsels",
+    "DatumEndgueltigeStilllegung", "DatumKapazitaetsreserve", "DatumLetzteAktualisierung", "DatumNetzreserve",
+    "DatumRegistrierungDesBetreiberwechsels", "DatumWiederaufnahmeBetrieb", "GeplantesInbetriebnahmedatum",
+    "Inbetriebnahmedatum", "InbetriebnahmedatumAmAktuellenStandort", "NetzbetreiberpruefungDatum",
+    "Registrierungsdatum", "SicherheitsbereitschaftAbDatum",
+];
+/// Zahlen und Ja/Nein-Felder (0/1).
+const ZAHL: &[&str] = &[
+    "AnlageIstImKombibetrieb", "AnschlussAnHoechstOderHochSpannung", "AnzahlModule",
+    "AuflageAbschaltungLeistungsbegrenzung", "AuflagenAbschaltungEiswurf",
+    "AuflagenAbschaltungSchallimmissionsschutzNachts", "AuflagenAbschaltungSchallimmissionsschutzTagsueber",
+    "AuflagenAbschaltungSchattenwurf", "AuflagenAbschaltungSonstige", "AuflagenAbschaltungTierschutz",
+    "AusschliesslicheVerwendungImKombibetrieb", "BestandteilGrenzkraftwerk", "Breitengrad", "Bruttoleistung",
+    "Buergerenergie", "EinheitlicheAusrichtungUndNeigungswinkel", "FernsteuerbarkeitDv", "FernsteuerbarkeitNb",
+    "GroesseDerInAnspruchGenommenenFlaeche", "GroesseDerInAnspruchGenommenenFlaecheInHektar",
+    "HausnummerNichtGefunden", "Hausnummer_nv", "KapazitaetsreserveZugeordnet", "Kraftwerksnummer_nv",
+    "Kuestenentfernung", "Laengengrad", "LichteHoehe", "MinderungStromerzeugung", "Nabenhoehe",
+    "Nachtkennzeichnung", "Nettonennleistung", "NettonennleistungDeutschland", "NetzreserveZugeordnet",
+    "NichtVorhandenInMigriertenEinheiten", "Notstromaggregat", "PumpbetriebKontinuierlichRegelbar",
+    "PumpbetriebLeistungsaufnahme", "Rotorblattenteisungssystem", "Rotordurchmesser", "SpeicherAmGleichenOrt",
+    "SteigerungNettonennleistungKombibetrieb", "StrasseNichtGefunden", "Wassertiefe", "Weic_nv",
+    "ZugeordnenteWirkleistungWechselrichter", "ZugeordneteWirkleistungWechselrichter",
+];
+/// Im XML als Katalog-Id kodiert (teils mehrere, durch Leerzeichen getrennt); wird beim Import in Klartext
+/// übersetzt. Welche Felder das sind, steht nicht im Export: ein neues Katalog-Feld muss hier ergänzt werden.
+const KATALOG: &[&str] = &[
+    "AcDcKoppelung", "ArtDerSolaranlage", "ArtDerWasserkraftanlage", "ArtDesZuflusses", "Batterietechnologie",
+    "Biomasseart", "Bundesland", "EinheitBetriebsstatus", "EinheitSystemstatus", "Einsatzort",
+    "Einspeisungsart", "Energietraeger", "GebietNachDemFlaechenentwicklungsplanNordsee",
+    "GebietNachDemFlaechenentwicklungsplanOstsee", "Hauptausrichtung", "HauptausrichtungNeigungswinkel",
+    "Hauptbrennstoff", "Hersteller", "Land", "Leistungsbegrenzung", "Nebenausrichtung",
+    "NebenausrichtungNeigungswinkel", "NetzbetreiberpruefungStatus", "Nutzungsbereich",
+    "Pumpspeichertechnologie", "Seelage", "SolaranlagenKategorie", "Technologie",
+    "UeberwiegendeNutzungsartDerFlaecheVorErrichtung", "VorherigerNutzungsartenbereichDerFlaeche",
+    "VorlaeufigeRegelzonenDerEinheit", "WeitereBrennstoffe", "WeitererHauptbrennstoff", "WindAnLandOderAufSee",
+    "ZusaetzlicheMerkmaleDerFlaecheUndDerAktuellenFlaechennutzung",
+];
+/// Alle Spalten; die Katalog-Spalten stehen am Ende (darauf verlässt sich `insert`).
+pub static COLUMNS: LazyLock<Vec<&str>> = LazyLock::new(|| [TEXT, DATUM, ZAHL, KATALOG].concat());
+/// Spalten mit Auswahl-Filter.
+const AUSWAHL: &[&str] = &["Energietraeger", "EinheitBetriebsstatus", "Bundesland"];
 const INDEXED: &[&str] = &["Energietraeger", "Bundesland", "Bruttoleistung", "Inbetriebnahmedatum", "Postleitzahl"];
 /// Alle Stromerzeugungseinheiten (ohne Verbraucher- und Gas-Einheiten).
 const FILES: &[&str] = &[
@@ -23,60 +67,52 @@ const FILES: &[&str] = &[
 
 type Row = HashMap<String, String>;
 
-/// Ein Datensatz, beim Einlesen auf die benötigten Felder reduziert: eine Einheiten-Datei hat
-/// ~60 Felder pro Datensatz und mehrere hundert MB, komplett im Speicher wären das zu viel.
-struct Slim(Row);
+/// Reicht die Datensätze einzeln weiter: eine Einheiten-Datei hat 100.000 Datensätze mit bis zu
+/// ~75 Feldern, komplett im Speicher wären das mehrere hundert MB.
+struct Rows<F>(F);
 
-impl<'de> Deserialize<'de> for Slim {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = Slim;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("MaStR-Datensatz")
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Slim, A::Error> {
-                let mut row = Row::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if COLUMNS.contains(&&*key) || key == "Id" || key == "Wert" {
-                        row.insert(key, map.next_value()?);
-                    } else {
-                        map.next_value::<IgnoredAny>()?;
-                    }
-                }
-                Ok(Slim(row))
-            }
-        }
-        d.deserialize_map(V)
+impl<'de, F: FnMut(Row) -> Res<()>> Visitor<'de> for Rows<F> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("MaStR-Datei")
     }
-}
-
-#[derive(Deserialize)]
-struct Datei {
-    #[serde(rename = "$value", default)]
-    rows: Vec<Slim>,
+    fn visit_map<A: MapAccess<'de>>(mut self, mut map: A) -> Result<(), A::Error> {
+        while map.next_key::<IgnoredAny>()?.is_some() {
+            (self.0)(map.next_value()?).map_err(serde::de::Error::custom)?;
+        }
+        Ok(())
+    }
 }
 
 /// Eine MaStR-XML-Datei: flache Liste von Datensätzen, UTF-16 mit BOM (quick-xml erwartet UTF-8).
-pub fn parse(xml: impl Read) -> Res<Vec<Row>> {
-    let datei: Datei = quick_xml::de::from_reader(BufReader::new(DecodeReaderBytes::new(xml)))?;
-    Ok(datei.rows.into_iter().map(|r| r.0).collect())
+pub fn parse(xml: impl Read, each: impl FnMut(Row) -> Res<()>) -> Res<()> {
+    let mut de = quick_xml::de::Deserializer::from_reader(BufReader::new(DecodeReaderBytes::new(xml)));
+    Ok(de.deserialize_map(Rows(each))?)
+}
+
+/// Typ einer Spalte für die Anzeige im Frontend.
+pub fn typ(column: &str) -> &'static str {
+    if ZAHL.contains(&column) {
+        "num"
+    } else if DATUM.contains(&column) {
+        "date"
+    } else {
+        "text"
+    }
 }
 
 pub fn create(db: &Connection) -> Res<()> {
-    let cols: Vec<String> = COLUMNS.iter().map(|c| format!("{c} {}", if REAL.contains(c) { "REAL" } else { "TEXT" })).collect();
+    let cols: Vec<String> = COLUMNS.iter().map(|c| format!("{c} {}", if ZAHL.contains(c) { "REAL" } else { "TEXT" })).collect();
     Ok(db.execute_batch(&format!("CREATE TABLE einheiten ({})", cols.join(", ")))?)
 }
 
-pub fn insert(db: &Connection, katalog: &HashMap<String, String>, rows: &[Row]) -> Res<()> {
-    let sql = format!("INSERT INTO einheiten VALUES ({})", vec!["?"; COLUMNS.len()].join(","));
-    let mut stmt = db.prepare_cached(&sql)?;
-    for row in rows {
-        stmt.execute(rusqlite::params_from_iter(COLUMNS.iter().map(|c| {
-            let v = row.get(*c)?;
-            Some(if KATALOG.contains(c) { katalog.get(v).unwrap_or(v) } else { v })
-        })))?;
-    }
+pub fn insert(db: &Connection, katalog: &HashMap<String, String>, row: &Row) -> Res<()> {
+    static SQL: LazyLock<String> = LazyLock::new(|| format!("INSERT INTO einheiten VALUES ({})", vec!["?"; COLUMNS.len()].join(",")));
+    let (plain, kat) = COLUMNS.split_at(COLUMNS.len() - KATALOG.len());
+    let klartext = |ids: &String| ids.split(' ').map(|id| katalog.get(id).map_or(id, |w| w)).collect::<Vec<_>>().join(", ");
+    db.prepare_cached(&SQL)?.execute(rusqlite::params_from_iter(
+        plain.iter().map(|c| row.get(*c).cloned()).chain(kat.iter().map(|c| row.get(*c).map(klartext))),
+    ))?;
     Ok(())
 }
 
@@ -85,16 +121,19 @@ pub fn finish(db: &Connection) -> Res<()> {
     for c in INDEXED {
         db.execute_batch(&format!("CREATE INDEX idx_{c} ON einheiten ({c})"))?;
     }
-    let werte: Vec<String> = KATALOG.iter().map(|c| format!("SELECT DISTINCT '{c}' AS spalte, {c} AS wert FROM einheiten WHERE {c} IS NOT NULL")).collect();
+    // Deckt die Suche (Name oder MaStR-Nr.) ab: gezählt wird im Index statt in der breiten Tabelle (~1,4 s statt ~2,5 s).
+    db.execute_batch("CREATE INDEX idx_suche ON einheiten (NameStromerzeugungseinheit, EinheitMastrNummer)")?;
+    let werte: Vec<String> = AUSWAHL.iter().map(|c| format!("SELECT DISTINCT '{c}' AS spalte, {c} AS wert FROM einheiten WHERE {c} IS NOT NULL")).collect();
     Ok(db.execute_batch(&format!("CREATE TABLE filterwerte AS {}; ANALYZE;", werte.join(" UNION ALL ")))?)
 }
 
 pub fn import(zip_path: &str, db_path: &str) -> Res<()> {
     let mut zip = zip::ZipArchive::new(File::open(zip_path)?)?;
-    let katalog: HashMap<String, String> = parse(zip.by_name("Katalogwerte.xml")?)?
-        .into_iter()
-        .filter_map(|mut r| Some((r.remove("Id")?, r.remove("Wert")?)))
-        .collect();
+    let mut katalog = HashMap::new();
+    parse(zip.by_name("Katalogwerte.xml")?, |mut r| {
+        katalog.extend(r.remove("Id").zip(r.remove("Wert")));
+        Ok(())
+    })?;
     let names: Vec<String> = zip
         .file_names()
         .map(|n| n.map(String::from))
@@ -110,10 +149,13 @@ pub fn import(zip_path: &str, db_path: &str) -> Res<()> {
     let tx = db.transaction()?;
     let mut total = 0;
     for (i, name) in names.iter().enumerate() {
-        let rows = parse(zip.by_name(name)?)?;
-        insert(&tx, &katalog, &rows)?;
-        total += rows.len();
-        eprintln!("[{}/{}] {name}: {} Einheiten", i + 1, names.len(), rows.len());
+        let mut n = 0;
+        parse(zip.by_name(name)?, |row| {
+            n += 1;
+            insert(&tx, &katalog, &row)
+        })?;
+        total += n;
+        eprintln!("[{}/{}] {name}: {n} Einheiten", i + 1, names.len());
     }
     tx.commit()?;
     eprintln!("{total} Einheiten importiert, erstelle Indizes …");

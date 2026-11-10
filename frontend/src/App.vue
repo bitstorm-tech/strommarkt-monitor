@@ -2,8 +2,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 
 const PAGE_SIZE = 50
-// `key` = Spaltenname der API (und Sortierschlüssel)
-const columns = [
+// Standardmäßig sichtbare Spalten; `key` = Spaltenname der API (und Sortierschlüssel)
+const standard = [
   { key: 'EinheitMastrNummer', label: 'MaStR-Nr.' },
   { key: 'NameStromerzeugungseinheit', label: 'Name' },
   { key: 'Energietraeger', label: 'Energieträger' },
@@ -33,6 +33,13 @@ const options = ref({})
 const result = ref({ total: 0, rows: [] })
 const loading = ref(true)
 const error = ref('')
+// Alle Spalten der Datenbank; bis /api/spalten geantwortet hat nur die Standardspalten.
+const allColumns = ref(standard)
+const visible = ref(JSON.parse(localStorage.getItem('spalten')) ?? standard.map((c) => c.key))
+// Reihenfolge wie ausgewählt: neu eingeblendete Spalten landen rechts.
+const columns = computed(() => visible.value.map((k) => allColumns.value.find((c) => c.key === k)).filter(Boolean))
+const choices = computed(() => [...allColumns.value].sort((a, b) => a.label.localeCompare(b.label, 'de')))
+const dialog = ref()
 const pages = computed(() => Math.max(1, Math.ceil(result.value.total / PAGE_SIZE)))
 
 async function getJson(url, signal) {
@@ -67,6 +74,10 @@ watch(filter, () => {
   schedule()
 })
 watch(view, schedule)
+watch(visible, (v) => {
+  localStorage.setItem('spalten', JSON.stringify(v))
+  if (!v.includes(view.sort)) view.sort = '' // nicht nach einer unsichtbaren Spalte sortieren
+})
 
 function sortBy(key) {
   view.desc = view.sort === key && !view.desc
@@ -83,6 +94,10 @@ function format(value, type) {
 }
 
 getJson('/api/filter').then((o) => (options.value = o)).catch(() => {}) // Fehler meldet load() bereits
+getJson('/api/spalten')
+  // Für die übrigen Spalten gibt es keine gepflegten Titel: Tag-Namen an den Wortgrenzen trennen.
+  .then((all) => (allColumns.value = all.map((c) => standard.find((s) => s.key === c.key) ?? { ...c, label: c.key.replace(/([a-z])([A-Z])/g, '$1 $2') })))
+  .catch(() => {})
 load()
 </script>
 
@@ -127,6 +142,7 @@ load()
     <strong aria-live="polite">{{ number.format(result.total) }} Einheiten</strong>
     <span v-if="loading" class="loading">lädt …</span>
     <span class="spacer"></span>
+    <button @click="dialog.showModal()">Einstellungen</button>
     <button :disabled="view.page === 0" @click="view.page--">‹ Zurück</button>
     <span>Seite {{ number.format(view.page + 1) }} von {{ number.format(pages) }}</span>
     <button :disabled="view.page + 1 >= pages" @click="view.page++">Weiter ›</button>
@@ -153,4 +169,16 @@ load()
       </tbody>
     </table>
   </div>
+
+  <dialog ref="dialog" aria-labelledby="einstellungen-titel">
+    <form method="dialog">
+      <h2 id="einstellungen-titel">Einstellungen</h2>
+      <fieldset>
+        <legend>Sichtbare Spalten</legend>
+        <label v-for="c in choices" :key="c.key"><input v-model="visible" type="checkbox" :value="c.key" /> {{ c.label }}</label>
+      </fieldset>
+      <button type="button" @click="visible = standard.map((c) => c.key)">Standardspalten</button>
+      <button>Schließen</button>
+    </form>
+  </dialog>
 </template>
