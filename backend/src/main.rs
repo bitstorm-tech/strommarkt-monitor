@@ -1,12 +1,12 @@
 mod import;
 
-use axum::{extract::{Path, Query, State}, http::StatusCode, routing::get, Json, Router};
+use axum::{extract::{Path, Query, State}, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use import::Ansicht;
 use duckdb::{params_from_iter, types::{Value, ValueRef}, AccessMode, Config, Connection};
 use serde::Deserialize;
 use serde_json::{json, Map, Value as Json_};
 use tokio::sync::Semaphore;
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::SystemTime};
+use std::{collections::HashMap, sync::{mpsc, Arc, Mutex}, time::{Duration, SystemTime}};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -97,6 +97,97 @@ fn spalten(a: &Ansicht) -> Json_ {
     a.spalten.iter().map(|c| json!({ "key": c, "type": import::typ(c) })).collect()
 }
 
+/// Größte Antwort an einen Agenten: mehr sprengt dessen Kontext.
+const MAX_BYTES: usize = 50_000;
+const SQL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Freie Abfrage für Agenten: { "columns": […], "rows": [[…]], "truncated": false }, alle Werte als Text.
+/// Die Instanz ist read-only, ohne Dateizugriff und mit gesperrter Konfiguration (`Db::connect`);
+/// hier kommen die Grenzen für Laufzeit und Größe dazu.
+fn sql(db: &Connection, query: &str, timeout: Duration) -> Res<Json_> {
+    let query = query.trim().trim_end_matches(';');
+    // Sonst führt prepare() vorangestellte Anweisungen aus, etwa ATTACH ':memory:', das den gemeinsamen Speicher füllt.
+    // shortcut: lehnt auch ein ';' in einem Textwert ab; bei Bedarf die Anweisungen mit duckdb_extract_statements zählen.
+    if query.contains(';') {
+        return Err("Nur eine Anweisung ohne ';' erlaubt".into());
+    }
+    let abbruch = db.interrupt_handle();
+    // Endet die Funktion, fällt `_fertig` weg und der Wächter beendet sich ohne Abbruch.
+    let (_fertig, fertig) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if fertig.recv_timeout(timeout) == Err(mpsc::RecvTimeoutError::Timeout) {
+            abbruch.interrupt();
+        }
+    });
+    // Als Unterabfrage sind nur lesende Anweisungen möglich, und DuckDB wandelt jeden Typ selbst in Text.
+    // Das LIMIT begrenzt, was DuckDB als Ergebnis im Speicher hält: jede Zeile zählt unten mindestens
+    // 5 Bytes, MAX_BYTES greift also immer zuerst.
+    let mut stmt = db.prepare(&format!("SELECT COLUMNS(*)::VARCHAR FROM (\n{query}\n) LIMIT {}", MAX_BYTES / 4))?;
+    let mut rows = stmt.query([])?;
+    let columns = rows.as_ref().expect("Abfrage läuft").column_names();
+    let (mut out, mut bytes, mut truncated) = (Vec::new(), 0, false);
+    while let Some(r) = rows.next()? {
+        let row = (0..columns.len()).map(|i| r.get_ref(i).map(to_json)).collect::<duckdb::Result<Vec<_>>>()?;
+        bytes += serde_json::to_string(&row)?.len() + 1;
+        if bytes > MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        out.push(row);
+    }
+    Ok(json!({ "columns": columns, "rows": out, "truncated": truncated }))
+}
+
+const TOOL_BESCHREIBUNG: &str = "Fragt das Marktstammdatenregister (MaStR) der Bundesnetzagentur per SQL ab: \
+genau eine lesende Abfrage im DuckDB-Dialekt, auch DESCRIBE <tabelle> und SUMMARIZE <tabelle>.\n\
+Tabellen, jeweils mehrere Millionen Zeilen:\n\
+- einheiten: Stromerzeugungseinheiten und Speicher, Schlüssel EinheitMastrNummer. Unter anderem Energietraeger, \
+Bruttoleistung und Nettonennleistung (kW), Bundesland, Landkreis, Gemeinde, Postleitzahl, Inbetriebnahmedatum, \
+EinheitBetriebsstatus, AnlagenbetreiberMastrNummer, NetzbetreiberMastrNummer, NetzbetreiberName, LokationMaStRNummer.\n\
+- netzanschlusspunkte: Schlüssel NetzanschlusspunktMastrNummer, dazu LokationMaStRNummer, NetzbetreiberMaStRNummer, Spannungsebene.\n\
+- marktakteure: Schlüssel MastrNummer, dazu Firmenname, Marktfunktion, Marktrollen.\n\
+Verknüpfungen: einheiten.LokationMaStRNummer = netzanschlusspunkte.LokationMaStRNummer; \
+einheiten.AnlagenbetreiberMastrNummer, einheiten.NetzbetreiberMastrNummer (vereinzelt mehrere, mit ', ' getrennt) \
+und netzanschlusspunkte.NetzbetreiberMaStRNummer = marktakteure.MastrNummer.\n\
+Datumsspalten sind Text (JJJJ-MM-TT, zum Rechnen ::DATE), Ja/Nein-Spalten sind 1/0. \
+Vor der ersten Abfrage die Spalten mit DESCRIBE ansehen und Auswahlwerte mit SELECT DISTINCT prüfen.\n\
+Grenzen: Abbruch nach 30 s (Fehler 'Interrupted'), höchstens etwa 50 KB Ergebnis (danach truncated: true). \
+Deshalb aggregieren, nur benötigte Spalten wählen und LIMIT setzen. Alle Werte kommen als Text.";
+
+/// MCP-Server (Streamable HTTP, zustandslos) mit dem einen Tool `sql`. Jede Antwort ist ein einzelnes JSON-Objekt, kein SSE.
+async fn mcp(State(db): State<Arc<Db>>, Json(msg): Json<Json_>) -> Response {
+    // Benachrichtigungen (ohne id) erwarten keine Antwort.
+    let Some(id) = msg.get("id") else { return StatusCode::ACCEPTED.into_response() };
+    let result = match msg["method"].as_str().unwrap_or_default() {
+        "initialize" => json!({
+            // shortcut: bestätigt jede Protokollversion des Clients, für ein einzelnes Tool unterscheiden sie sich bisher nicht;
+            // feste Versionen aushandeln, sobald eine neue mehr verlangt.
+            "protocolVersion": msg["params"]["protocolVersion"],
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "strommarkt-monitor", "version": env!("CARGO_PKG_VERSION") },
+        }),
+        "ping" => json!({}),
+        "tools/list" => json!({ "tools": [{
+            "name": "sql",
+            "description": TOOL_BESCHREIBUNG,
+            "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "Eine SELECT-Abfrage (DuckDB-SQL)" } }, "required": ["query"] },
+        }] }),
+        "tools/call" => {
+            let query = msg["params"]["arguments"]["query"].as_str().unwrap_or_default().to_string();
+            let eine = db.sql_slot.clone().acquire_owned().await.expect("Semaphore wird nie geschlossen");
+            let r = run(db, move |c| {
+                let _eine = eine;
+                sql(c, &query, SQL_TIMEOUT)
+            })
+            .await;
+            // Der Agent bekommt die Fehlermeldung von DuckDB und kann seine Abfrage damit korrigieren.
+            json!({ "isError": r.is_err(), "content": [{ "type": "text", "text": r.map_or_else(|e| e, |v| v.to_string()) }] })
+        }
+        _ => return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Unbekannte Methode" } })).into_response(),
+    };
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+}
+
 /// Eine DuckDB-Instanz für alle Anfragen: jede Instanz hat eigenen Puffer und eigene Threads, eine pro Anfrage
 /// belegte bei 8 parallelen Anfragen ~5 GB (der Server hat 1 GB).
 struct Db {
@@ -104,6 +195,8 @@ struct Db {
     conn: Mutex<Option<(SystemTime, Connection)>>,
     /// Höchstens 2 Abfragen gleichzeitig, sonst reicht auch die Speichergrenze nicht; weitere warten.
     slots: Arc<Semaphore>,
+    /// Höchstens eine Agenten-Abfrage gleichzeitig; sie braucht zusätzlich einen der `slots`, belegt also nie beide.
+    sql_slot: Arc<Semaphore>,
 }
 
 impl Db {
@@ -118,7 +211,11 @@ impl Db {
                 .access_mode(AccessMode::ReadOnly)?
                 .max_memory("200MB")?
                 .threads(2)?
-                .with("temp_directory", std::env::temp_dir().join("strommarkt-duckdb").to_string_lossy())?;
+                .with("temp_directory", std::env::temp_dir().join("strommarkt-duckdb").to_string_lossy())?
+                // Für freies SQL: kein Zugriff auf Dateien, ATTACH oder Extensions, und kein SET, das die Grenzen oben aufhebt.
+                // Erst nach temp_directory, das sich danach nicht mehr setzen lässt.
+                .enable_external_access(false)?
+                .with("lock_configuration", "true")?;
             *conn = Some((mtime, Connection::open_with_flags(&self.path, config)?));
         }
         Ok(conn.as_ref().unwrap().1.try_clone()?)
@@ -130,7 +227,7 @@ fn finde(name: &str) -> Result<&'static Ansicht, (StatusCode, String)> {
 }
 
 /// DuckDB blockiert, daher läuft jede Anfrage auf einem Blocking-Thread.
-async fn with_db(db: Arc<Db>, f: impl FnOnce(&Connection) -> Res<Json_> + Send + 'static) -> Result<Json<Json_>, (StatusCode, String)> {
+async fn run(db: Arc<Db>, f: impl FnOnce(&Connection) -> Res<Json_> + Send + 'static) -> Result<Json_, String> {
     // Die Erlaubnis wandert in den Thread: bricht der Client ab, läuft die Abfrage trotzdem zu Ende und zählt weiter mit.
     let slot = db.slots.clone().acquire_owned().await.expect("Semaphore wird nie geschlossen");
     tokio::task::spawn_blocking(move || {
@@ -140,11 +237,13 @@ async fn with_db(db: Arc<Db>, f: impl FnOnce(&Connection) -> Res<Json_> + Send +
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r.map_err(|e| e.to_string()))
-        .map(Json)
-        .map_err(|e| {
-            eprintln!("Fehler: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Datenbankfehler".into())
-        })
+}
+
+async fn with_db(db: Arc<Db>, f: impl FnOnce(&Connection) -> Res<Json_> + Send + 'static) -> Result<Json<Json_>, (StatusCode, String)> {
+    run(db, f).await.map(Json).map_err(|e| {
+        eprintln!("Fehler: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "Datenbankfehler".into())
+    })
 }
 
 #[tokio::main]
@@ -154,7 +253,7 @@ async fn main() -> Res<()> {
     if args.get(1).map(String::as_str) == Some("import") {
         return import::import(args.get(2).ok_or("Aufruf: backend import <Gesamtdatenexport.zip>")?, &db);
     }
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/{ansicht}", get(|State(db), Path(a): Path<String>, Query(f): Query<Filter>, Query(s): Query<Spaltenfilter>| async move {
             let a = finde(&a)?;
             with_db(db, move |c| zeilen(c, a, &f, &s)).await
@@ -163,10 +262,16 @@ async fn main() -> Res<()> {
             let a = finde(&a)?;
             with_db(db, move |c| filterwerte(c, a)).await
         }))
-        .route("/api/{ansicht}/spalten", get(|Path(a): Path<String>| async move { finde(&a).map(|a| Json(spalten(a))) }))
+        .route("/api/{ansicht}/spalten", get(|Path(a): Path<String>| async move { finde(&a).map(|a| Json(spalten(a))) }));
+    // Ohne MCP_TOKEN gibt es den Endpunkt nicht. Der Token steht im Pfad statt in einem Header,
+    // weil nicht jeder Chat-Client eigene Header mitschicken kann.
+    if let Some(token) = std::env::var("MCP_TOKEN").ok().filter(|t| !t.is_empty()) {
+        app = app.route(&format!("/mcp/{token}"), post(mcp));
+    }
+    let app = app
         // Im Container liefert das Backend auch das gebaute Frontend aus
         .fallback_service(tower_http::services::ServeDir::new(std::env::var("STATIC_DIR").unwrap_or("../frontend/dist".into())))
-        .with_state(Arc::new(Db { path: db, conn: Mutex::new(None), slots: Arc::new(Semaphore::new(2)) }));
+        .with_state(Arc::new(Db { path: db, conn: Mutex::new(None), slots: Arc::new(Semaphore::new(2)), sql_slot: Arc::new(Semaphore::new(1)) }));
     let listener = tokio::net::TcpListener::bind(std::env::var("ADDR").unwrap_or("127.0.0.1:3000".into())).await?;
     eprintln!("Backend läuft auf http://{}", listener.local_addr()?);
     Ok(axum::serve(listener, app).await?)
@@ -175,6 +280,42 @@ async fn main() -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_fuer_agenten() {
+        let path = std::env::temp_dir().join(format!("strommarkt-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Connection::open(&path).unwrap().execute_batch("CREATE TABLE t AS SELECT range AS n, 'x' || range AS s FROM range(3)").unwrap();
+        let db = Db { path: path.to_string_lossy().into(), conn: Mutex::new(None), slots: Arc::new(Semaphore::new(2)), sql_slot: Arc::new(Semaphore::new(1)) };
+        let db = db.connect().unwrap();
+        let ok = |q: &str| sql(&db, q, SQL_TIMEOUT).unwrap();
+
+        // Sortierung bleibt, jeder Typ kommt als Text, ';' und Kommentar am Ende stören nicht.
+        assert_eq!(
+            ok("SELECT s, n / 2 AS halb, DATE '2024-01-02' AS d, [n] AS l, NULL AS leer FROM t ORDER BY n DESC LIMIT 2;\n"),
+            json!({ "columns": ["s", "halb", "d", "l", "leer"], "rows": [["x2", "1.0", "2024-01-02", "[2]", null], ["x1", "0.5", "2024-01-02", "[1]", null]], "truncated": false })
+        );
+        assert_eq!(ok("SELECT sum(n) FROM t -- Summe")["rows"], json!([["3"]]));
+        assert_eq!(ok("DESCRIBE t")["rows"][0][0], "n");
+        assert_eq!(ok("SUMMARIZE t")["rows"][1][0], "s");
+        assert_eq!(ok("SHOW TABLES")["rows"], json!([["t"]]));
+        let gross = ok("SELECT repeat('x', 1000) FROM range(100)");
+        assert_eq!(gross["truncated"], true);
+        assert_eq!(gross["rows"].as_array().unwrap().len(), 49);
+
+        // Kein Dateizugriff, keine zweite Anweisung, nichts Schreibendes, Konfiguration gesperrt.
+        for q in ["SELECT * FROM read_csv('/etc/passwd')", "SELECT * FROM glob('/etc/*')", "SELECT 1) ; ATTACH ':memory:' AS a; SELECT (1", "DELETE FROM t", "SET max_memory = '10GB'"] {
+            assert!(sql(&db, q, SQL_TIMEOUT).is_err(), "{q}");
+        }
+        for q in ["SET max_memory = '10GB'", "COPY t TO '/tmp/strommarkt-test.csv'", "ATTACH '/tmp/strommarkt-test2.db' AS a"] {
+            assert!(db.execute_batch(q).is_err(), "{q}");
+        }
+
+        let start = std::time::Instant::now();
+        assert!(sql(&db, "SELECT sum(a.range * b.range) FROM range(1000000) a, range(1000000) b", Duration::from_millis(200)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn import_und_filter() {

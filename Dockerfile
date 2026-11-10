@@ -18,5 +18,6 @@ RUN ldconfig
 COPY --from=frontend /app/dist /app/static
 # Die Datenbank liegt auf einem Volume unter /data (Import: backend import <zip>)
 ENV MASTR_DB=/data/mastr.db STATIC_DIR=/app/static ADDR=0.0.0.0:3000
+# MCP_TOKEN beim Start setzen (langer Zufallswert aus Buchstaben und Ziffern): schaltet den SQL-Zugang für Agenten unter /mcp/<Token> frei
 EXPOSE 3000
 CMD ["backend"]
