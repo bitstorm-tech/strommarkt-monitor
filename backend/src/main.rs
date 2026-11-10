@@ -40,7 +40,8 @@ fn where_clause(f: &Filter) -> (String, Vec<Value>) {
     add("Energietraeger = ?", text(&f.energietraeger));
     add("EinheitBetriebsstatus = ?", text(&f.betriebsstatus));
     add("Bundesland = ?", text(&f.bundesland));
-    add("Postleitzahl LIKE ?", f.plz.as_ref().map(|p| format!("{p}%").into()));
+    // GLOB statt LIKE: nur GLOB kann für die Präfixsuche den Index nutzen.
+    add("Postleitzahl GLOB ?", f.plz.as_ref().map(|p| format!("{p}*").into()));
     add("Ort LIKE ?", f.ort.as_ref().map(|o| format!("{o}%").into()));
     add("Bruttoleistung >= ?", f.leistung_min.map(Value::from));
     add("Bruttoleistung <= ?", f.leistung_max.map(Value::from));

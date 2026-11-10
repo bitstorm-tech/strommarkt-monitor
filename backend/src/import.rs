@@ -2,7 +2,7 @@
 use crate::Res;
 use encoding_rs_io::DecodeReaderBytes;
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{de::{IgnoredAny, MapAccess, Visitor}, Deserialize, Deserializer};
 use std::{collections::HashMap, fs::File, io::{BufReader, Read}};
 
 /// Spalten der Tabelle `einheiten`; die Namen sind die Tag-Namen im MaStR-XML.
@@ -23,15 +23,44 @@ const FILES: &[&str] = &[
 
 type Row = HashMap<String, String>;
 
+/// Ein Datensatz, beim Einlesen auf die benötigten Felder reduziert: eine Einheiten-Datei hat
+/// ~60 Felder pro Datensatz und mehrere hundert MB, komplett im Speicher wären das zu viel.
+struct Slim(Row);
+
+impl<'de> Deserialize<'de> for Slim {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Slim;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("MaStR-Datensatz")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Slim, A::Error> {
+                let mut row = Row::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if COLUMNS.contains(&&*key) || key == "Id" || key == "Wert" {
+                        row.insert(key, map.next_value()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(Slim(row))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
 #[derive(Deserialize)]
 struct Datei {
     #[serde(rename = "$value", default)]
-    rows: Vec<Row>,
+    rows: Vec<Slim>,
 }
 
 /// Eine MaStR-XML-Datei: flache Liste von Datensätzen, UTF-16 mit BOM (quick-xml erwartet UTF-8).
 pub fn parse(xml: impl Read) -> Res<Vec<Row>> {
-    Ok(quick_xml::de::from_reader::<_, Datei>(BufReader::new(DecodeReaderBytes::new(xml)))?.rows)
+    let datei: Datei = quick_xml::de::from_reader(BufReader::new(DecodeReaderBytes::new(xml)))?;
+    Ok(datei.rows.into_iter().map(|r| r.0).collect())
 }
 
 pub fn create(db: &Connection) -> Res<()> {
