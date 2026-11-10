@@ -83,7 +83,7 @@ const aktiv = ref(tabs[0])
   </header>
 
   <div class="tabs" role="tablist">
-    <button v-for="t in tabs" :key="t.api" :id="`tab-${t.api}`" role="tab" :aria-selected="t === aktiv" aria-controls="tabelle" @click="aktiv = t">
+    <button v-for="t in tabs" :key="t.api" :id="`tab-${t.api}`" role="tab" :aria-selected="t.api === aktiv.api" aria-controls="tabelle" @click="aktiv = t">
       {{ t.titel }}
     </button>
   </div>
