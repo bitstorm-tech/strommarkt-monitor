@@ -29,7 +29,12 @@ const allColumns = ref(standard)
 const visible = ref(JSON.parse(localStorage.getItem('spalten')) ?? standard.map((c) => c.key))
 // Reihenfolge wie ausgewählt: neu eingeblendete Spalten landen rechts.
 const columns = computed(() => visible.value.map((k) => allColumns.value.find((c) => c.key === k)).filter(Boolean))
-const choices = computed(() => [...allColumns.value].sort((a, b) => a.label.localeCompare(b.label, 'de')))
+const columnSearch = ref('')
+const choices = computed(() =>
+  allColumns.value
+    .filter((c) => c.label.toLowerCase().includes(columnSearch.value.trim().toLowerCase()))
+    .sort((a, b) => a.label.localeCompare(b.label, 'de')),
+)
 const dialog = ref()
 const pages = computed(() => Math.max(1, Math.ceil(result.value.total / PAGE_SIZE)))
 
@@ -160,6 +165,8 @@ load()
   <dialog ref="dialog" aria-labelledby="einstellungen-titel">
     <form method="dialog">
       <h2 id="einstellungen-titel">Einstellungen</h2>
+      <!-- Enter würde das Formular absenden und den Dialog schließen -->
+      <input v-model="columnSearch" type="search" placeholder="Spalte suchen…" aria-label="Spalten durchsuchen" @keydown.enter.prevent />
       <fieldset>
         <legend>Sichtbare Spalten</legend>
         <div><label v-for="c in choices" :key="c.key"><input v-model="visible" type="checkbox" :value="c.key" /> {{ c.label }}</label></div>

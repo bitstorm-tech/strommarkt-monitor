@@ -54,6 +54,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 dialog h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
 /* Nur die Spaltenliste scrollt, Überschrift und Buttons bleiben sichtbar.
    Spalten auf dem inneren div: Mehrspaltensatz mit begrenzter Höhe würde seitlich überlaufen statt zu scrollen. */
+dialog input[type='search'] { width: 100%; margin-bottom: 0.5rem; }
 dialog fieldset { max-height: calc(100dvh - 12rem); overflow-y: auto; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; }
 dialog fieldset > div { columns: 16rem; }
 dialog label { display: block; padding: 0.15rem 0; overflow-wrap: anywhere; break-inside: avoid; }
