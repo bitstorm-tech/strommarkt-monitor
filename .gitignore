@@ -1,0 +1,5 @@
+# Rohdaten und daraus erzeugte Datenbank
+mastr/
+*.db
+*.db.tmp
+backend/target/

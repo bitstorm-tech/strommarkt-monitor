@@ -1,0 +1,50 @@
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#f6f7f9, #15171a);
+  --surface: light-dark(#fff, #1e2126);
+  --border: light-dark(#d9dde3, #343941);
+  --muted: light-dark(#5b6472, #9aa3b0);
+  --accent: light-dark(#0b6bcb, #6cb2ff);
+  font: 14px/1.4 system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 1rem 1.25rem; background: var(--bg); }
+h1 { margin: 0; font-size: 1.4rem; }
+header p { margin: 0 0 1rem; color: var(--muted); }
+
+.filter {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.filter .wide { grid-column: span 2; }
+.filter label, .filter legend { display: grid; gap: 0.25rem; padding: 0; font-size: 0.85rem; color: var(--muted); }
+.filter fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem; margin: 0; padding: 0; border: 0; min-width: 0; }
+.filter legend { margin-bottom: 0.25rem; }
+input, select, button { font: inherit; font-size: 1rem; padding: 0.4rem 0.5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: inherit; min-width: 0; width: 100%; }
+button { cursor: pointer; width: auto; }
+button:disabled { cursor: default; opacity: 0.5; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.error { padding: 0.6rem 1rem; border: 1px solid #c0392b; border-radius: 8px; color: light-dark(#a02a1e, #ff9a8d); }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 1rem 0 0.5rem; }
+.pager .spacer { flex: 1; }
+.loading { color: var(--muted); }
+
+.table { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.table.stale { opacity: 0.6; }
+table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+th, td { padding: 0.45rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+td { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; }
+th { padding: 0; background: var(--bg); }
+th button { width: 100%; padding: 0.55rem 0.75rem; border: 0; border-radius: 0; background: none; font-weight: 600; text-align: inherit; }
+th[aria-sort='none'] span { opacity: 0.35; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--bg); }
+tbody tr:last-child td { border-bottom: 0; }
+.empty { padding: 2rem; text-align: center; color: var(--muted); }
