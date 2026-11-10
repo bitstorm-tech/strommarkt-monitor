@@ -1,7 +1,8 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 
-const PAGE_SIZE = 50
+// "Alle" nur bis zu dieser Trefferzahl, sonst lädt der Browser Millionen Zeilen; muss zum Limit im Backend passen.
+const MAX_PAGE_SIZE = 10000
 // Standardmäßig sichtbare Spalten; `key` = Spaltenname der API (und Sortierschlüssel)
 const standard = [
   { key: 'EinheitMastrNummer', label: 'MaStR-Nr.' },
@@ -19,7 +20,7 @@ const standard = [
 ]
 // Suche plus ein Filter je sichtbarer Spalte: `Spalte.von`/`Spalte.bis` bei Zahlen und Daten, sonst `Spalte`.
 const filter = reactive({ q: '' })
-const view = reactive({ sort: '', desc: false, page: 0 })
+const view = reactive({ sort: '', desc: false, page: 0, size: 50 })
 const options = ref({})
 const result = ref({ total: 0, rows: [] })
 const loading = ref(true)
@@ -36,7 +37,7 @@ const choices = computed(() =>
     .sort((a, b) => a.label.localeCompare(b.label, 'de')),
 )
 const dialog = ref()
-const pages = computed(() => Math.max(1, Math.ceil(result.value.total / PAGE_SIZE)))
+const pages = computed(() => Math.max(1, Math.ceil(result.value.total / view.size)))
 
 async function getJson(url, signal) {
   const res = await fetch(url, { signal })
@@ -48,7 +49,7 @@ let running, timer
 async function load() {
   running?.abort() // eine ältere, langsamere Antwort darf die neuere nicht überschreiben
   const mine = (running = new AbortController())
-  const params = new URLSearchParams({ page: view.page, page_size: PAGE_SIZE, desc: view.desc })
+  const params = new URLSearchParams({ page: view.page, page_size: view.size, desc: view.desc })
   if (view.sort) params.set('sort', view.sort)
   for (const [k, v] of Object.entries(filter)) if (v !== '' && v != null) params.set(k, v)
   loading.value = true
@@ -134,6 +135,12 @@ load()
     <strong aria-live="polite">{{ number.format(result.total) }} Einheiten</strong>
     <span v-if="loading" class="loading">lädt …</span>
     <span class="spacer"></span>
+    <label>Pro Seite
+      <select v-model.number="view.size" @change="view.page = 0">
+        <option v-for="n in [50, 100, 250]" :key="n" :value="n">{{ n }}</option>
+        <option :value="MAX_PAGE_SIZE" :disabled="result.total > MAX_PAGE_SIZE">Alle{{ result.total > MAX_PAGE_SIZE ? ' (max. 10.000)' : '' }}</option>
+      </select>
+    </label>
     <button @click="dialog.showModal()">Einstellungen</button>
     <button :disabled="view.page === 0" @click="view.page--">‹ Zurück</button>
     <span>Seite {{ number.format(view.page + 1) }} von {{ number.format(pages) }}</span>

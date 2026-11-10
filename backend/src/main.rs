@@ -62,7 +62,7 @@ fn einheiten(db: &Connection, f: &Filter, spalten: &Spaltenfilter) -> Res<Json_>
     // `sort` landet im SQL-Text, deshalb nur bekannte Spaltennamen zulassen.
     let sort = f.sort.as_deref().filter(|s| COLUMNS.contains(s)).unwrap_or("rowid");
     let dir = if f.desc == Some(true) { "DESC" } else { "ASC" };
-    let size = f.page_size.unwrap_or(50).min(500) as u64;
+    let size = f.page_size.unwrap_or(50).min(10_000) as u64; // wie MAX_PAGE_SIZE im Frontend
     // Erst nur die rowids der Seite bestimmen, dann deren Spalten holen: sonst sortiert DuckDB bei hohen
     // Seiten alle 127 Spalten aller Treffer (42 s statt 0,1 s für Seite 100.000).
     let order = format!("ORDER BY {sort} {dir}, rowid {dir}");
