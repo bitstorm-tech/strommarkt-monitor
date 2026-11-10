@@ -71,4 +71,6 @@ dialog button { margin-right: 0.5rem; }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
 .tabs button { margin-bottom: -1px; border-radius: 6px 6px 0 0; background: none; color: var(--muted); }
-.tabs button[aria-selected='true'] { background: var(--surface); border-bottom-color: var(--surface); color: inherit; font-weight: 600; }
+.tabs button:hover { color: inherit; }
+/* Akzentlinie oben, damit der aktive Tab klar erkennbar ist */
+.tabs button[aria-selected='true'] { background: var(--surface); border-bottom-color: var(--surface); color: var(--accent); font-weight: 600; box-shadow: inset 0 3px var(--accent); }
