@@ -1,8 +1,6 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 
-// "Alle" nur bis zu dieser Trefferzahl, sonst lädt der Browser Millionen Zeilen; muss zum Limit im Backend passen.
-const MAX_PAGE_SIZE = 10000
 // Standardmäßig sichtbare Spalten; `key` = Spaltenname der API (und Sortierschlüssel)
 const standard = [
   { key: 'EinheitMastrNummer', label: 'MaStR-Nr.' },
@@ -137,8 +135,7 @@ load()
     <span class="spacer"></span>
     <label>Pro Seite
       <select v-model.number="view.size" @change="view.page = 0">
-        <option v-for="n in [50, 100, 250]" :key="n" :value="n">{{ n }}</option>
-        <option :value="MAX_PAGE_SIZE" :disabled="result.total > MAX_PAGE_SIZE">Alle{{ result.total > MAX_PAGE_SIZE ? ' (max. 10.000)' : '' }}</option>
+        <option v-for="n in [50, 100, 250, 1000]" :key="n" :value="n">{{ n }}</option>
       </select>
     </label>
     <button @click="dialog.showModal()">Einstellungen</button>
